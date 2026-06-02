@@ -1,0 +1,4 @@
+interface:
+  display_name: "US Market Risk Monitor"
+  short_description: "Daily US market risk lights"
+  default_prompt: "生成今天的美股见顶 / 崩盘监控报告，并给出绿 / 黄 / 橙 / 红行动映射。"
