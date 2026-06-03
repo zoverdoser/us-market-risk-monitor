@@ -103,13 +103,13 @@ MOVE / 利率波动代理：
 - 级别：核心代理项。
 - 主方法：若能稳定获得 MOVE exact，则使用 exact。
 - fallback 必须实现：FRED `DGS2`、`DGS10`，计算 10 日 / 20 日收益率日变化波动率，并与近 3 个月均值比较。
-- 若 MOVE exact 源未配置，输出：`MOVE exact source not configured; using Treasury yield volatility proxy`。
+- 若 MOVE exact 源未接入，输出数据源提示，说明使用 Treasury yield volatility proxy，且不作为错误处理。
 - 若 FRED 利率数据超时，使用 Yahoo Finance 代理：`ZT=F` 作为 2Y Treasury futures proxy，`^TNX` 作为 10Y Treasury yield proxy。
 
 SOFR-OIS / funding stress：
 
 - 级别：高级确认项，不是硬依赖。
-- exact 源未配置时输出：`SOFR-OIS exact source not configured; using credit + rates + banks as proxy`。
+- exact 源未接入时输出数据源提示，说明使用 credit + rates + banks proxy，且不作为错误处理。
 - 代理逻辑：HY OAS / IG OAS 是否同步走阔、2Y / 10Y 波动是否上升、银行板块是否显著弱于大盘、funding stress 新闻是否出现。
 
 ### D 市场内部结构层
@@ -128,7 +128,7 @@ SOFR-OIS / funding stress：
 增强项：
 
 - A/D line、200 日线上股票占比、新高 / 新低家数。
-- 若取不到，输出：`breadth auxiliary metrics unavailable, using ETF breadth proxies instead`。
+- 若取不到，输出数据源提示，说明使用 ETF breadth proxies，且不作为错误处理。
 
 归因规则：
 

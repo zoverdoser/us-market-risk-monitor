@@ -10,6 +10,7 @@ import json
 import math
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -167,7 +168,7 @@ def fetch_current_vx() -> dict:
             "source": "TradingView futures scanner",
             "vx1_symbol": front["symbol"],
             "vx2_symbol": second["symbol"],
-            "error": repr(exc),
+            "error": external_error_summary(exc),
         }
 
 
@@ -207,8 +208,8 @@ def light_from_level(level: str) -> str:
 
 def format_unavailable(metric: str, proxy: str | None = None) -> str:
     if proxy:
-        return f"{metric} exact source not configured; {proxy}"
-    return f"{metric} exact source not configured"
+        return data_source_note(metric, proxy)
+    return f"数据源提示：{metric} exact 数据源未接入，不影响主流程。"
 
 
 def map_action_light(modules: dict[str, dict]) -> dict:
@@ -444,7 +445,21 @@ def fetch_yahoo_stats(symbol: str, rng: str = "3mo") -> dict:
 def fred_fallback_reason(exc: Exception) -> str:
     if isinstance(exc, FredApiKeyMissing):
         return "FRED_API_KEY not configured"
-    return f"FRED API failed: {type(exc).__name__}"
+    if isinstance(exc, (TimeoutError, urllib.error.URLError)):
+        return "FRED API unavailable"
+    return "FRED API unavailable"
+
+
+def external_error_summary(exc: Exception) -> str:
+    if isinstance(exc, urllib.error.URLError):
+        return "network unavailable"
+    if isinstance(exc, (TimeoutError, PermissionError, OSError)):
+        return "network unavailable"
+    return "external data unavailable"
+
+
+def data_source_note(metric: str, proxy: str) -> str:
+    return f"数据源提示：{metric} 使用 {proxy}（exact 数据源未接入，不影响主流程）。"
 
 
 def fetch_series_with_yahoo_fallback(series: str, yahoo_symbol: str, proxy_label: str) -> dict:
@@ -516,7 +531,7 @@ def classify_relative(name: str, rels: dict[int, float | None], negative_is_bad:
     r20 = rels.get(20)
     r60 = rels.get(60)
     if r20 is None:
-        return {"level": "yellow", "summary": f"{name} unavailable"}
+        return {"level": "yellow", "summary": f"{name} unavailable", "available": False}
     pressure = -r20 if negative_is_bad else r20
     if pressure >= 5 or (pressure >= 3 and r60 is not None and (-r60 if negative_is_bad else r60) >= 6):
         level = "orange"
@@ -524,7 +539,11 @@ def classify_relative(name: str, rels: dict[int, float | None], negative_is_bad:
         level = "yellow"
     else:
         level = "green"
-    return {"level": level, "summary": f"{name}: 5d {fmt_pct(rels.get(5))}, 20d {fmt_pct(r20)}, 60d {fmt_pct(r60)}"}
+    return {
+        "level": level,
+        "summary": f"{name}: 5d {fmt_pct(rels.get(5))}, 20d {fmt_pct(r20)}, 60d {fmt_pct(r60)}",
+        "available": True,
+    }
 
 
 def daily_changes(rows: list[tuple[dt.date, float]]) -> list[float]:
@@ -547,14 +566,17 @@ def rolling_change_vol(rows: list[tuple[dt.date, float]], window: int) -> float 
 
 
 def aggregate_structure_buckets(conclusions: list[dict]) -> dict:
+    available_conclusions = [conclusion for conclusion in conclusions if conclusion.get("available", True)]
+    if not available_conclusions:
+        return {"level": "green", "summary": "结构代理数据不可用，结论置信度降低。"}
     risky_buckets = {
         conclusion.get("bucket")
-        for conclusion in conclusions
+        for conclusion in available_conclusions
         if conclusion.get("bucket") and level_rank(conclusion.get("level", "green")) >= 1
     }
     orange_buckets = {
         conclusion.get("bucket")
-        for conclusion in conclusions
+        for conclusion in available_conclusions
         if conclusion.get("bucket") and level_rank(conclusion.get("level", "green")) >= 2
     }
     if len(orange_buckets) >= 1 or len(risky_buckets) >= 2:
@@ -707,20 +729,28 @@ def module_transmission() -> dict:
             try:
                 conclusion = credit_etf_proxy(name, proxy, reason=fred_fallback_reason(exc))
             except Exception as proxy_exc:
-                conclusion = {"level": "yellow", "summary": f"{name} proxy unavailable after FRED {type(exc).__name__}: {proxy_exc!r}"}
+                conclusion = {
+                    "level": "yellow",
+                    "summary": f"{name} proxy unavailable; {fred_fallback_reason(exc)}; ETF proxy {external_error_summary(proxy_exc)}",
+                    "available": False,
+                }
         conclusions.append(conclusion)
         lines.append(conclusion["summary"])
 
     try:
         dgs2 = fetch_series_with_yahoo_fallback("DGS2", "ZT=F", "2Y Treasury futures proxy")
         dgs10 = fetch_series_with_yahoo_fallback("DGS10", "^TNX", "10Y Treasury yield proxy")
-        lines.append("MOVE exact source not configured; using Treasury yield volatility proxy")
+        lines.append(data_source_note("MOVE", "Treasury yield volatility proxy"))
         rate_level = classify_rate_vol_proxy(dgs2, dgs10)
     except Exception as exc:
-        rate_level = {"level": "yellow", "summary": f"MOVE / rates proxy fallback failed: {exc!r}"}
+        rate_level = {
+            "level": "yellow",
+            "summary": f"MOVE / rates proxy fallback failed: {external_error_summary(exc)}",
+            "available": False,
+        }
     conclusions.append(rate_level)
     lines.append(rate_level["summary"])
-    lines.append("SOFR-OIS exact source not configured; using credit + rates + banks as proxy")
+    lines.append(data_source_note("SOFR-OIS", "credit + rates + banks proxy"))
 
     level = max((c["level"] for c in conclusions), key=level_rank)
     return {"level": level, "summary": "；".join(c["summary"] for c in conclusions), "lines": lines}
@@ -778,7 +808,7 @@ def module_structure() -> dict:
     aggregate = aggregate_structure_buckets(conclusions)
     level = aggregate["level"]
     summary = aggregate["summary"]
-    lines.append("breadth auxiliary metrics unavailable, using ETF breadth proxies instead")
+    lines.append(data_source_note("breadth auxiliary metrics", "ETF breadth proxies"))
     lines.append(summary)
     return {"level": level, "summary": summary, "lines": lines}
 
@@ -794,7 +824,11 @@ def module_slow_pressure() -> dict:
         try:
             conclusion = rate_proxy_summary(name, series, yahoo_symbol, proxy_label)
         except Exception as exc:
-            conclusion = {"level": "yellow", "summary": f"{name} proxy unavailable after fallback: {exc!r}"}
+            conclusion = {
+                "level": "yellow",
+                "summary": f"{name} proxy unavailable after fallback: {external_error_summary(exc)}",
+                "available": False,
+            }
         conclusions.append(conclusion)
         lines.append(conclusion["summary"])
     oil_stats = fetch_oil_stats()

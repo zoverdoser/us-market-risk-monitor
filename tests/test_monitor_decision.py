@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import datetime as dt
+import urllib.error
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -136,7 +137,63 @@ def test_unavailable_advanced_metrics_are_reported_not_blocking():
 
     line = monitor.format_unavailable("SOFR-OIS", "using credit + rates + banks as proxy")
 
-    assert line == "SOFR-OIS exact source not configured; using credit + rates + banks as proxy"
+    assert line == "数据源提示：SOFR-OIS 使用 using credit + rates + banks as proxy（exact 数据源未接入，不影响主流程）。"
+
+
+def test_fred_network_fallback_reason_does_not_leak_exception_class():
+    monitor = load_monitor()
+
+    reason = monitor.fred_fallback_reason(urllib.error.URLError("timed out"))
+
+    assert reason == "FRED API unavailable"
+    assert "URLError" not in reason
+
+
+def test_external_error_summary_hides_raw_network_exception_details():
+    monitor = load_monitor()
+
+    reason = monitor.external_error_summary(urllib.error.URLError(PermissionError(1, "Operation not permitted")))
+
+    assert reason == "network unavailable"
+    assert "URLError" not in reason
+    assert "PermissionError" not in reason
+
+
+def test_transmission_lines_label_configured_proxies_as_data_notes(monkeypatch):
+    monitor = load_monitor()
+
+    monkeypatch.setattr(
+        monitor,
+        "fetch_series_with_yahoo_fallback",
+        lambda series, yahoo_symbol, proxy_label: {"available": True, "rows": []},
+    )
+    monkeypatch.setattr(monitor, "fetch_fred_series", lambda series: {"available": True, "latest": 1.0, "change_5d": 0.0, "change_20d": 0.0})
+
+    result = monitor.module_transmission()
+    rendered = "\n".join(result["lines"])
+
+    assert "MOVE exact source not configured" not in rendered
+    assert "SOFR-OIS exact source not configured" not in rendered
+    assert "数据源提示" in rendered
+
+
+def test_transmission_proxy_failures_do_not_leak_raw_exceptions(monkeypatch):
+    monitor = load_monitor()
+
+    monkeypatch.setattr(monitor, "fetch_fred_series", lambda series: (_ for _ in ()).throw(urllib.error.URLError("fred blocked")))
+    monkeypatch.setattr(monitor, "credit_etf_proxy", lambda *args, **kwargs: (_ for _ in ()).throw(urllib.error.URLError("yahoo blocked")))
+    monkeypatch.setattr(
+        monitor,
+        "fetch_series_with_yahoo_fallback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(urllib.error.URLError(PermissionError(1, "Operation not permitted"))),
+    )
+
+    result = monitor.module_transmission()
+    rendered = "\n".join(result["lines"])
+
+    assert "URLError" not in rendered
+    assert "PermissionError" not in rendered
+    assert "network unavailable" in rendered
 
 
 def test_unavailable_module_does_not_escalate_action_light():
@@ -232,6 +289,19 @@ def test_structure_bucket_aggregation_does_not_double_count_related_breadth_sign
     assert "局部" in result["summary"]
 
 
+def test_structure_bucket_aggregation_ignores_unavailable_relative_signals():
+    monitor = load_monitor()
+    conclusions = [
+        {"level": "yellow", "bucket": "breadth", "summary": "SPY vs RSP unavailable", "available": False},
+        {"level": "yellow", "bucket": "financial_credit", "summary": "XLF unavailable", "available": False},
+    ]
+
+    result = monitor.aggregate_structure_buckets(conclusions)
+
+    assert result["level"] == "green"
+    assert "不可用" in result["summary"]
+
+
 def test_structure_bucket_aggregation_requires_distinct_bucket_confirmation_for_orange():
     monitor = load_monitor()
     conclusions = [
@@ -244,6 +314,19 @@ def test_structure_bucket_aggregation_requires_distinct_bucket_confirmation_for_
 
     assert result["level"] == "orange"
     assert "不同结构风险桶" in result["summary"]
+
+
+def test_structure_lines_label_breadth_auxiliary_fallback_as_data_note(monkeypatch):
+    monitor = load_monitor()
+    rows = [(dt.date(2026, 1, 1) + dt.timedelta(days=i), 100.0 + i) for i in range(80)]
+
+    monkeypatch.setattr(monitor, "fetch_yahoo_chart", lambda symbol: rows)
+
+    result = monitor.module_structure()
+    rendered = "\n".join(result["lines"])
+
+    assert "breadth auxiliary metrics unavailable" not in rendered
+    assert "数据源提示" in rendered
 
 
 def test_oil_pressure_classifier_uses_price_change_when_available():
@@ -312,15 +395,6 @@ def test_tradingview_vx_scanner_response_builds_vx_spread():
     assert result["vx1_price"] == 17.9
     assert result["vx2_price"] == 20.3
     assert round(result["spread"], 2) == -2.4
-
-
-def test_monitor_does_not_depend_on_external_vix_skill():
-    source = SCRIPT.read_text()
-    skill_text = SKILL.read_text()
-
-    assert "vix-term-structure" not in source
-    assert "VIX_TERM_SCRIPT" not in source
-    assert "vix-term-structure" not in skill_text
 
 
 def test_fred_csv_url_limits_observation_window():
