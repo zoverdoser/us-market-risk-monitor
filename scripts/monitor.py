@@ -214,9 +214,9 @@ def format_unavailable(metric: str, proxy: str | None = None) -> str:
 def map_action_light(modules: dict[str, dict]) -> dict:
     events = modules.get("events", {})
     if events.get("override") and events.get("level") == "red":
-        return action_payload("红", "事件层 override：重大事件直接提升整体风险等级")
+        return action_payload("红", "事件层 override：重大事件直接提升整体风险等级", "red")
     if events.get("override") and level_rank(events.get("level", "green")) >= 2:
-        return action_payload("橙", "事件层 override：事件已明显冲击风险偏好")
+        return action_payload("橙", "事件层 override：事件已明显冲击风险偏好", "hard_orange")
 
     risk_modules = {name: item for name, item in modules.items() if item.get("available", True)}
     unavailable = [name for name, item in modules.items() if not item.get("available", True)]
@@ -227,17 +227,28 @@ def map_action_light(modules: dict[str, dict]) -> dict:
     yellows = [name for name, item in risk_modules.items() if level_rank(item.get("level", "green")) >= 1]
 
     if len(reds) >= 2 or (reds and len(oranges) >= 2):
-        return action_payload("红", "多个独立模块同时红或红色风险获得跨模块确认" + confidence_note)
+        return action_payload("红", "多个独立模块同时红或红色风险获得跨模块确认" + confidence_note, "red")
     if reds:
-        return action_payload("橙", f"核心模块红色但尚未形成红灯确认：{', '.join(reds)}" + confidence_note)
+        return action_payload("橙", f"核心模块红色但尚未形成红灯确认：{', '.join(reds)}" + confidence_note, "hard_orange")
     if len(oranges) >= 2:
-        return action_payload("橙", "两个独立模块同时恶化" + confidence_note)
+        return action_payload("橙", "两个独立模块同时恶化" + confidence_note, classify_orange_tone(oranges, reds))
     if len(yellows) >= 1:
-        return action_payload("黄", "任一核心模块出现脆弱信号，但未形成跨模块确认" + confidence_note)
-    return action_payload("绿", "情绪、传导、结构、事件与慢变量均未显示明显恶化" + confidence_note)
+        return action_payload("黄", "任一核心模块出现脆弱信号，但未形成跨模块确认" + confidence_note, "yellow")
+    return action_payload("绿", "情绪、传导、结构、事件与慢变量均未显示明显恶化" + confidence_note, "green")
 
 
-def action_payload(light: str, reason: str) -> dict:
+def classify_orange_tone(oranges: list[str], reds: list[str]) -> str:
+    orange_set = set(oranges)
+    if reds:
+        return "hard_orange"
+    if "transmission" in orange_set or "events" in orange_set:
+        return "hard_orange"
+    if "slow_pressure" in orange_set and "structure" in orange_set:
+        return "hard_orange"
+    return "soft_orange"
+
+
+def action_payload(light: str, reason: str, risk_tone: str | None = None) -> dict:
     table = {
         "绿": {
             "do": "允许正常配置；观望标的按正常标准评估；新增仓位不需要额外折扣。",
@@ -247,17 +258,17 @@ def action_payload(light: str, reason: str) -> dict:
             "core_book": "无需额外防守。",
         },
         "黄": {
-            "do": "保留更多现金；新信号减半；观望标的提高准入门槛。",
-            "avoid": "停止新增高 beta；不主动追纳指 / 日股。",
-            "high_beta": "停止新加，已有仓位看个股质量。",
-            "watchlist": "提高赔率与回撤要求。",
+            "do": "保留更多现金；新信号按正常仓位的 25%-50% 试错；观望标的提高准入门槛。",
+            "avoid": "不满仓追高 beta；不主动追纳指 / 日股的拥挤方向。",
+            "high_beta": "允许正常仓位的 25%-50% 小仓位试错，要求趋势、流动性和止损位同时满足。",
+            "watchlist": "提高赔率、回撤和流动性要求。",
             "core_book": "检查组合相关性与流动性。",
         },
         "橙": {
-            "do": "防守资产优先；检查沉淀层是否需要对冲思维。",
-            "avoid": "停止所有高 beta 加仓；观望标的不纳入。",
-            "high_beta": "只减不加，除非低相关且高把握。",
-            "watchlist": "暂停纳入。",
+            "do": "防守资产优先；新仓只允许极少数高把握、低相关方向；检查沉淀层是否需要对冲思维。",
+            "avoid": "停止高 beta / 高相关主题加仓；不纳入流动性差或拥挤交易标的。",
+            "high_beta": "只减不加，除非低相关且高把握，并使用显著低于正常的试错仓位。",
+            "watchlist": "暂停高 beta / 高相关标的纳入；保留低相关、高确定性或防守型标的观察。",
             "core_book": "评估对冲、现金和可逆性。",
         },
         "红": {
@@ -268,7 +279,55 @@ def action_payload(light: str, reason: str) -> dict:
             "core_book": "优先降低组合脆弱度。",
         },
     }
-    return {"light": light, "reason": reason, **table[light]}
+    default_tone = {"绿": "green", "黄": "yellow", "橙": "hard_orange", "红": "red"}
+    return {"light": light, "risk_tone": risk_tone or default_tone[light], "reason": reason, **table[light]}
+
+
+def map_fund_execution(market_action: dict) -> dict:
+    tone = market_action.get("risk_tone", "yellow")
+    table = {
+        "green": {
+            "execution_light": "绿",
+            "subscription": "正常申购 / 正常定投，计划资金可按 100% 执行。",
+            "dca": "宽基和核心基金按原计划执行。",
+            "redemption": "不需要因风险灯号赎回。",
+            "qdii": "QDII 正常评估，但仍检查溢价、额度和汇率。",
+            "next_watch": "观察风险模块是否从绿转黄。",
+        },
+        "yellow": {
+            "execution_light": "黄",
+            "subscription": "新增申购降至正常计划的 50%-75%，高 beta 主题基金偏下限。",
+            "dca": "宽基定投可继续，主题定投减半或暂停一期。",
+            "redemption": "已有仓位不因单一黄灯主动赎回，先检查集中度和流动性。",
+            "qdii": "QDII 新增需额外检查净值滞后、溢价和赎回到账时间。",
+            "next_watch": "若第二个独立模块转橙，基金执行灯升软橙或硬橙。",
+        },
+        "soft_orange": {
+            "execution_light": "软橙",
+            "subscription": "宽基新增降至正常计划的 25%-50%；暂停高 beta / 单一主题基金新增。",
+            "dca": "宽基定投可小额继续，主题定投暂停一期等待确认。",
+            "redemption": "不建议因单日软橙立即赎回；连续 2 个交易日软橙再考虑降低主题暴露。",
+            "qdii": "QDII 暂停追高申购，重点检查溢价、汇率和赎回周期。",
+            "next_watch": "若信用、利率或事件层确认恶化，软橙升硬橙。",
+        },
+        "hard_orange": {
+            "execution_light": "硬橙",
+            "subscription": "暂停权益基金新增；只保留现金、短债、低波或极低相关方向。",
+            "dca": "权益宽基定投暂停一期，高 beta 主题定投暂停。",
+            "redemption": "已有高 beta / QDII / 单一主题基金可考虑分批降低暴露，避免一次性砍仓。",
+            "qdii": "QDII 优先考虑退出成本、净值滞后、溢价和到账周期。",
+            "next_watch": "若风险传导继续恶化或事件升级，硬橙升红。",
+        },
+        "red": {
+            "execution_light": "红",
+            "subscription": "停止新增权益基金申购，优先保留现金和低波动资产。",
+            "dca": "暂停权益类定投。",
+            "redemption": "优先分批处理高波动、流动性差、溢价高、赎回慢的品种。",
+            "qdii": "QDII 重点管理退出代价、赎回到账和汇率风险。",
+            "next_watch": "等待信用、利率、事件和情绪层同步缓和后再恢复申购。",
+        },
+    }
+    return table.get(tone, table["yellow"])
 
 
 def parse_numeric_csv(text: str, value_col: str = "VALUE") -> list[tuple[dt.date, float]]:
@@ -795,11 +854,13 @@ def build_report() -> str:
         "events": module_events(),
     }
     action = map_action_light(modules)
+    fund = map_fund_execution(action)
     sections = [
-        "# 美股见顶 / 崩盘监控报告",
+        "# 美股风险监控 / T+1 基金执行参考",
         "",
         "## 1. 总体结论",
-        f"- 当前总体灯号：{action['light']}",
+        f"- 当前市场风险灯：{action['light']}",
+        f"- 当前基金执行灯：{fund['execution_light']}",
         f"- 一句话解释：{action['reason']}",
         "",
         "## 2. 情绪 / 脆弱度层",
@@ -822,12 +883,19 @@ def build_report() -> str:
         *bullet_lines(modules["events"]["lines"]),
         f"- 本层结论：{light_from_level(modules['events']['level'])}，{modules['events']['summary']}",
         "",
-        "## 7. 行动映射",
+        "## 7. 市场风险动作映射",
         f"- 当前应该做什么：{action['do']}",
         f"- 当前不该做什么：{action['avoid']}",
         f"- 高 beta：{action['high_beta']}",
         f"- 观望标的：{action['watchlist']}",
         f"- 沉淀层：{action['core_book']}",
+        "",
+        "## 8. T+1 基金执行建议",
+        f"- 新增/申购：{fund['subscription']}",
+        f"- 定投：{fund['dca']}",
+        f"- 赎回/降低暴露：{fund['redemption']}",
+        f"- QDII：{fund['qdii']}",
+        f"- 明日观察触发器：{fund['next_watch']}",
     ]
     return "\n".join(sections) + "\n"
 

@@ -58,6 +58,79 @@ def test_two_independent_orange_modules_map_to_orange():
     assert "两个独立模块" in action["reason"]
 
 
+def test_sentiment_and_structure_orange_is_soft_orange_for_funds():
+    monitor = load_monitor()
+    modules = {
+        "sentiment": {"level": "orange", "summary": "期限结构压缩", "available": True},
+        "transmission": {"level": "green", "summary": "信用稳定", "available": True},
+        "structure": {"level": "orange", "summary": "领导权狭窄", "available": True},
+        "slow_pressure": {"level": "green", "summary": "慢变量可控", "available": True},
+        "events": {"level": "green", "summary": "无重大事件", "override": False, "available": True},
+    }
+
+    market = monitor.map_action_light(modules)
+    fund = monitor.map_fund_execution(market)
+
+    assert market["light"] == "橙"
+    assert market["risk_tone"] == "soft_orange"
+    assert fund["execution_light"] == "软橙"
+    assert "不建议因单日软橙立即赎回" in fund["redemption"]
+
+
+def test_credit_confirmed_orange_is_hard_orange_for_funds():
+    monitor = load_monitor()
+    modules = {
+        "sentiment": {"level": "orange", "summary": "期限结构压缩", "available": True},
+        "transmission": {"level": "orange", "summary": "信用利差走阔", "available": True},
+        "structure": {"level": "green", "summary": "结构健康", "available": True},
+        "slow_pressure": {"level": "green", "summary": "慢变量可控", "available": True},
+        "events": {"level": "green", "summary": "无重大事件", "override": False, "available": True},
+    }
+
+    market = monitor.map_action_light(modules)
+    fund = monitor.map_fund_execution(market)
+
+    assert market["light"] == "橙"
+    assert market["risk_tone"] == "hard_orange"
+    assert fund["execution_light"] == "硬橙"
+    assert "暂停权益基金新增" in fund["subscription"]
+
+
+def test_report_outputs_market_risk_and_t1_fund_execution(monkeypatch):
+    monitor = load_monitor()
+    module_stub = {"level": "green", "summary": "ok", "lines": ["ok"], "available": True}
+
+    monkeypatch.setattr(monitor, "module_sentiment", lambda: module_stub)
+    monkeypatch.setattr(monitor, "module_transmission", lambda: module_stub)
+    monkeypatch.setattr(monitor, "module_structure", lambda: module_stub)
+    monkeypatch.setattr(monitor, "module_slow_pressure", lambda: module_stub)
+    monkeypatch.setattr(monitor, "module_events", lambda: {**module_stub, "override": False})
+
+    report = monitor.build_report()
+
+    assert "当前市场风险灯" in report
+    assert "T+1 基金执行建议" in report
+    assert "新增/申购" in report
+
+
+def test_yellow_action_uses_position_budget_not_full_high_beta_ban():
+    monitor = load_monitor()
+
+    action = monitor.action_payload("黄", "single weak signal")
+
+    assert "25%-50%" in action["high_beta"]
+    assert "停止新增高 beta" not in action["avoid"]
+
+
+def test_orange_action_keeps_low_correlation_watchlist_open():
+    monitor = load_monitor()
+
+    action = monitor.action_payload("橙", "two weak modules")
+
+    assert "低相关" in action["watchlist"]
+    assert "暂停纳入" not in action["watchlist"]
+
+
 def test_unavailable_advanced_metrics_are_reported_not_blocking():
     monitor = load_monitor()
 
